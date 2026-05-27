@@ -69,8 +69,12 @@ fi
 echo -e "\033[1;34mBuilding Docker image '${IMAGE_NAME}'...\033[0m"
 docker build -t "${IMAGE_NAME}" -f "${SCRIPT_DIR}/Dockerfile" "${SCRIPT_DIR}"
 
+HOST_HF_CACHE="${HOME}/.cache/huggingface"
+mkdir -p "${HOST_HF_CACHE}"
+
 echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
 docker run --gpus all --rm \
+  -v "${HOST_HF_CACHE}:/root/.cache/huggingface" \
   -e HF_REPO="${HF_REPO_VAL}" \
   -e HF_TOKEN="${HF_TOKEN_VAL}" \
   -e PORT="${PORT_VAL}" \
