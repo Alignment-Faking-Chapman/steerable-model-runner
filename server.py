@@ -86,42 +86,58 @@ def startup_event():
     types_path = model_dir / "intervention_types.json"
     adapters_path = model_dir / "lora_adapters.pt"
 
-    if not meta_path.exists() or not types_path.exists() or not adapters_path.exists():
-        print(f"Error: Missing required model files (meta.json, intervention_types.json, or lora_adapters.pt) in {hf_repo}")
-        sys.exit(1)
+    is_steerable = meta_path.exists() and types_path.exists() and adapters_path.exists()
 
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-    with open(types_path, "r", encoding="utf-8") as f:
-        intervention_types = json.load(f)
+    if is_steerable:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        with open(types_path, "r", encoding="utf-8") as f:
+            intervention_types = json.load(f)
 
-    config_dict = meta.get("config", {})
-    original_base_model = config_dict.get("base_model", "dphn/dolphin-2.9-llama3-8b")
+        config_dict = meta.get("config", {})
+        original_base_model = config_dict.get("base_model", "dphn/dolphin-2.9-llama3-8b")
 
-    # If llama sub-directory exists, use it as local base model
-    local_llama = model_dir / "llama"
-    if local_llama.exists() and (local_llama / "config.json").exists():
-        print(f"Using local fine-tuned base model from: {local_llama}")
-        config_dict["base_model"] = str(local_llama)
+        # If llama sub-directory exists, use it as local base model
+        local_llama = model_dir / "llama"
+        if local_llama.exists() and (local_llama / "config.json").exists():
+            print(f"Using local fine-tuned base model from: {local_llama}")
+            config_dict["base_model"] = str(local_llama)
+        else:
+            print(f"Using pre-trained base model: {original_base_model}")
+            config_dict["base_model"] = original_base_model
+
+        config_dict["signal_dim"] = len(intervention_types)
+        cfg = TrainingConfig(**config_dict)
+        dtype = torch.bfloat16 if cfg.bf16 else torch.float32
+
+        # Load model
+        print(f"Building SteeredModel on {model_device}...")
+        model_obj = build_model(cfg, device=model_device)
+        model_obj.lora.load_state_dict(
+            torch.load(adapters_path, map_location="cpu")
+        )
+        model_obj.eval()
+
+        default_steering_vector = torch.zeros(
+            1, cfg.signal_dim, device=model_device, dtype=dtype
+        )
     else:
-        print(f"Using pre-trained base model: {original_base_model}")
-        config_dict["base_model"] = original_base_model
+        print(f"Required steerable model files not found in {hf_repo}. Loading as a typical (non-steerable) model.")
+        intervention_types = []
+        default_steering_vector = None
+        original_base_model = hf_repo
 
-    config_dict["signal_dim"] = len(intervention_types)
-    cfg = TrainingConfig(**config_dict)
-    dtype = torch.bfloat16 if cfg.bf16 else torch.float32
-
-    # Load model
-    print(f"Building SteeredModel on {model_device}...")
-    model_obj = build_model(cfg, device=model_device)
-    model_obj.lora.load_state_dict(
-        torch.load(adapters_path, map_location="cpu")
-    )
-    model_obj.eval()
-
-    default_steering_vector = torch.zeros(
-        1, cfg.signal_dim, device=model_device, dtype=dtype
-    )
+        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        print(f"Loading typical model directly on {model_device}...")
+        from transformers import AutoModelForCausalLM
+        model_obj = AutoModelForCausalLM.from_pretrained(
+            str(model_dir),
+            torch_dtype=dtype,
+            device_map=model_device,
+            trust_remote_code=True,
+        )
+        model_obj.llama = model_obj
+        model_obj.eval()
 
     # Load tokenizer (prefer local files downloaded from repo if available, else load from original base model)
     print(f"Loading tokenizer...")
@@ -228,6 +244,8 @@ async def get_model_info():
 async def get_steering():
     if model_obj is None:
         raise HTTPException(status_code=503, detail="Server not ready yet.")
+    if default_steering_vector is None:
+        return {"model": hf_repo, "dimensions": {}}
     weights = {
         dim: default_steering_vector[0, idx].item()
         for idx, dim in enumerate(intervention_types)
@@ -238,6 +256,8 @@ async def get_steering():
 async def update_steering(req: SteeringUpdateRequest):
     if model_obj is None:
         raise HTTPException(status_code=503, detail="Server not ready yet.")
+    if default_steering_vector is None:
+        raise HTTPException(status_code=400, detail="Model is not steerable.")
     for dim_name, val in req.weights.items():
         try:
             idx = find_dim_index(dim_name, intervention_types)
@@ -255,8 +275,10 @@ async def chat_completion(request: ChatCompletionRequest):
         raise HTTPException(status_code=503, detail="Server not ready yet.")
 
     # Build steering vector for this request
-    req_s = default_steering_vector.clone()
+    req_s = default_steering_vector.clone() if default_steering_vector is not None else None
     if request.steering:
+        if req_s is None:
+            raise HTTPException(status_code=400, detail="Model is not steerable.")
         for dim_name, val in request.steering.items():
             try:
                 idx = find_dim_index(dim_name, intervention_types)
@@ -278,7 +300,7 @@ async def chat_completion(request: ChatCompletionRequest):
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())
 
-    steering_active = req_s.abs().sum().item() > 0.0
+    steering_active = req_s.abs().sum().item() > 0.0 if req_s is not None else False
 
     def _gen_kwargs(streamer=None):
         kw = dict(
