@@ -136,7 +136,30 @@ def startup_event():
             device_map=model_device,
             trust_remote_code=True,
         )
-        model_obj.llama = model_obj
+
+        # Check for compiled prompt adapter
+        compiled_adapter_path = os.environ.get("COMPILED_ADAPTER", "").strip()
+        if compiled_adapter_path:
+            if os.path.exists(compiled_adapter_path):
+                print(f"Applying compiled prompt adapter from {compiled_adapter_path}...")
+                try:
+                    adapter_weights = torch.load(
+                        compiled_adapter_path,
+                        map_location=model_device,
+                        weights_only=True
+                    )
+                    applied_count = 0
+                    for name, module in model_obj.named_modules():
+                        if name in adapter_weights:
+                            module.weight.data += adapter_weights[name].to(module.weight.device).to(module.weight.dtype)
+                            applied_count += 1
+                    print(f"Successfully applied {applied_count} layer weights from compiled adapter.")
+                except Exception as e:
+                    print(f"Error applying compiled adapter: {e}")
+            else:
+                print(f"Warning: COMPILED_ADAPTER path '{compiled_adapter_path}' does not exist.")
+
+        model_obj.__dict__["llama"] = model_obj
         model_obj.eval()
 
     # Load tokenizer (prefer local files downloaded from repo if available, else load from original base model)

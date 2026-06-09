@@ -36,6 +36,7 @@ The `run.sh` script supports the following command-line flags (which fallback to
 | `--hf-repo` / `--hf_repo` | `HF_REPO` | The Hugging Face Repository ID | **Yes** | - |
 | `--hf-token` / `--hf_token` | `HF_TOKEN` | Hugging Face Access Token (for gated repositories) | No | - |
 | `--port` | `PORT` | Local host port to bind to the server | No | `8000` |
+| `--compiled-adapter` / `--compiled_adapter` | `COMPILED_ADAPTER` | Path to a compiled prompt adapter `.pt` file to apply to the base model at startup | No | - |
 
 ---
 
