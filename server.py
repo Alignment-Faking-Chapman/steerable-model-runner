@@ -68,15 +68,12 @@ def startup_event():
     model_device = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Downloading steerable model from HF Hub: {hf_repo}...")
-    model_dir = Path("/app/model_files")
-    model_dir.mkdir(parents=True, exist_ok=True)
-
     try:
-        snapshot_download(
+        model_dir_str = snapshot_download(
             repo_id=hf_repo,
-            local_dir=model_dir,
             token=hf_token if hf_token else None,
         )
+        model_dir = Path(model_dir_str)
     except Exception as e:
         print(f"Error downloading repository: {e}")
         sys.exit(1)
