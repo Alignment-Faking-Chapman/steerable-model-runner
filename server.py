@@ -344,12 +344,21 @@ async def chat_completion(request: ChatCompletionRequest):
 
     # Format messages using the tokenizer's chat template
     messages_list = [{"role": msg.role, "content": msg.content} for msg in request.messages]
-    input_ids = tokenizer.apply_chat_template(
+    chat_outputs = tokenizer.apply_chat_template(
         messages_list,
         add_generation_prompt=True,
         return_tensors="pt"
-    ).to(model_device)
-    attention_mask = torch.ones_like(input_ids).to(model_device)
+    )
+    if isinstance(chat_outputs, dict):
+        input_ids = chat_outputs["input_ids"].to(model_device)
+        attention_mask = chat_outputs.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(model_device)
+        else:
+            attention_mask = torch.ones_like(input_ids).to(model_device)
+    else:
+        input_ids = chat_outputs.to(model_device)
+        attention_mask = torch.ones_like(input_ids).to(model_device)
 
     completion_id = f"chatcmpl-{uuid.uuid4()}"
     created_time = int(time.time())

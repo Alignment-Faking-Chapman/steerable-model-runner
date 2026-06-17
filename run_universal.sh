@@ -29,6 +29,7 @@ HF_REPO_VAL="${HF_REPO}"
 HF_TOKEN_VAL="${HF_TOKEN}"
 PORT_VAL="${PORT:-8000}"
 COMPILED_ADAPTER_VAL="${COMPILED_ADAPTER}"
+GPUS_VAL="${GPUS:-1}"
 
 # ---------------------------------------------------------------------------
 # 1. Parse command-line arguments (no-ops on the SLURM re-invocation, since
@@ -56,6 +57,11 @@ while [[ $# -gt 0 ]]; do
     --port)
       if [[ -n "$2" && "$2" != -* ]]; then PORT_VAL="$2"; shift 2
       else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --gpus=*)
+      GPUS_VAL="${1#*=}"; shift ;;
+    --gpus)
+      if [[ -n "$2" && "$2" != -* ]]; then GPUS_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
     *)
       echo "Error: Unknown argument $1" >&2; exit 1 ;;
   esac
@@ -69,7 +75,7 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
 
   if [[ -z "${HF_REPO_VAL}" ]]; then
     echo "Error: HF_REPO is required to run the server."
-    echo "Usage: ./run.sh --hf-repo \"ChapAF/steerable-dolphin-8b\" [--hf-token \"your_token\"] [--port 8000] [--compiled-adapter \"path/to/compiled_adapter.pt\"]"
+    echo "Usage: ./run.sh --hf-repo \"ChapAF/steerable-dolphin-8b\" [--hf-token \"your_token\"] [--port 8000] [--compiled-adapter \"path/to/compiled_adapter.pt\"] [--gpus \"1\"]"
     exit 1
   fi
 
@@ -99,7 +105,7 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
     fi
 
     echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
-    docker run --gpus all --rm \
+    docker run --gpus "${GPUS_VAL}" --rm \
       -v "${HOST_HF_CACHE}:/root/.cache/huggingface" \
       -e HF_REPO="${HF_REPO_VAL}" \
       -e HF_TOKEN="${HF_TOKEN_VAL}" \
