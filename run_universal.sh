@@ -131,12 +131,15 @@ fi
 # ---------------------------------------------------------------------------
 cd "${SLURM_SUBMIT_DIR}"
 
+module load cuda11.8
+
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
 if ! conda env list | awk '{print $1}' | grep -qx "${CONDA_ENV_NAME}"; then
     echo "Creating conda environment '${CONDA_ENV_NAME}'..."
     conda create -y -n "${CONDA_ENV_NAME}" python=3.12.4
     conda activate "${CONDA_ENV_NAME}"
+    pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu118
     pip install --no-cache-dir -r requirements.txt
 else
     echo "Conda environment '${CONDA_ENV_NAME}' already exists. Activating..."
