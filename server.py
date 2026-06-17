@@ -85,7 +85,13 @@ def startup_event():
         sys.exit(1)
 
     hf_token = os.environ.get("HF_TOKEN", "").strip()
-    model_device = os.environ.get("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+    device_env = os.environ.get("DEVICE", "").strip()
+    if device_env:
+        model_device = device_env
+    elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        model_device = "auto"
+    else:
+        model_device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"Downloading steerable model from HF Hub: {hf_repo}...")
     try:
@@ -135,6 +141,10 @@ def startup_event():
         )
         model_obj.eval()
 
+        # Resolve "auto" device map to actual execution device (typically cuda:0)
+        if model_device == "auto":
+            model_device = next(model_obj.parameters()).device
+
         default_steering_vector = torch.zeros(
             1, cfg.signal_dim, device=model_device, dtype=dtype
         )
@@ -153,6 +163,10 @@ def startup_event():
             device_map=model_device,
             trust_remote_code=True,
         )
+
+        # Resolve "auto" device map to actual execution device (typically cuda:0)
+        if model_device == "auto":
+            model_device = next(model_obj.parameters()).device
 
         # Check for compiled prompt adapter
         compiled_adapter_path = os.environ.get("COMPILED_ADAPTER", "").strip()
