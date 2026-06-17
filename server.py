@@ -59,6 +59,26 @@ def active_steering(model_inst: SteeredModel, s_vec: torch.Tensor):
 def startup_event():
     global model_obj, tokenizer, model_device, eos_ids, hf_repo, intervention_types, default_steering_vector
 
+    print("CUDA available:", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        print("Device count:", device_count)
+    
+        for i in range(device_count):
+            print("\nDevice", i)
+            print("Name:", torch.cuda.get_device_name(i))
+            print("Capability:", torch.cuda.get_device_capability(i))
+    
+            props = torch.cuda.get_device_properties(i)
+            print("Total memory (GB):", round(props.total_memory / 1e9, 2))
+            print("Multi-processor count:", props.multi_processor_count)
+    
+            allocated = torch.cuda.memory_allocated(i) / 1e9
+            reserved = torch.cuda.memory_reserved(i) / 1e9
+            print("Allocated memory (GB):", round(allocated, 3))
+            print("Reserved memory (GB):", round(reserved, 3))
+            
     hf_repo = os.environ.get("HF_REPO", "").strip()
     if not hf_repo:
         print("Error: HF_REPO environment variable is required.")
