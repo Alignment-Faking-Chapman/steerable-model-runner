@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "steerable-model-runner"
+version = "1.0.0"
+requires-python = ">=3.9"
+description = "Steerable LLM inference server backed by vLLM"
+
+[project.entry-points."vllm.general_plugins"]
+# vLLM loads all vllm.general_plugins entry points in every worker process
+# at startup. This ensures SteerableVllmLlama is registered and the
+# GPUModelRunnerBase patch is applied across all workers (required for
+# Ray-based or spawn-based multi-process serving).
+steerable_runner = "vllm_plugin:register"
+
+[tool.setuptools]
+# All modules live at the package root; no sub-packages needed.
+packages = []
+py-modules = [
+    "steerable_vllm_model",
+    "vllm_plugin",
+    "model",
+    "config",
+    "server",
+]

@@ -1,5 +1,5 @@
+vllm>=0.6.0
 transformers
-accelerate
 huggingface_hub
 fastapi
 uvicorn
