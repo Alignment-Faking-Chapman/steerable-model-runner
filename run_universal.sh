@@ -30,6 +30,8 @@ HF_TOKEN_VAL="${HF_TOKEN}"
 PORT_VAL="${PORT:-8000}"
 COMPILED_ADAPTER_VAL="${COMPILED_ADAPTER}"
 GPUS_VAL="${GPUS:-1}"
+MAX_GPUS_VAL="${MAX_GPUS:-2}"
+MIN_GPU_MEMORY_VAL="${MIN_GPU_MEMORY:-4000}"
 
 # ---------------------------------------------------------------------------
 # 1. Parse command-line arguments (no-ops on the SLURM re-invocation, since
@@ -61,6 +63,16 @@ while [[ $# -gt 0 ]]; do
       GPUS_VAL="${1#*=}"; shift ;;
     --gpus)
       if [[ -n "$2" && "$2" != -* ]]; then GPUS_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --max-gpus=*|--max_gpus=*)
+      MAX_GPUS_VAL="${1#*=}"; shift ;;
+    --max-gpus|--max_gpus)
+      if [[ -n "$2" && "$2" != -* ]]; then MAX_GPUS_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --min-gpu-memory=*|--min_gpu_memory=*)
+      MIN_GPU_MEMORY_VAL="${1#*=}"; shift ;;
+    --min-gpu-memory|--min_gpu_memory)
+      if [[ -n "$2" && "$2" != -* ]]; then MIN_GPU_MEMORY_VAL="$2"; shift 2
       else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
     *)
       echo "Error: Unknown argument $1" >&2; exit 1 ;;
@@ -102,6 +114,68 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
     if [[ -n "${COMPILED_ADAPTER_VAL}" ]]; then
       echo -e "\033[1;36mUsing compiled prompt adapter: ${COMPILED_ADAPTER_VAL}\033[0m"
       EXTRA_RUN_ARGS+=("-v" "${COMPILED_ADAPTER_VAL}:/app/compiled_adapter.pt" "-e" "COMPILED_ADAPTER=/app/compiled_adapter.pt")
+    fi
+
+    # Determine which GPUs to use
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      if [[ "${GPUS_VAL}" == device=* ]]; then
+        echo -e "\033[1;36mUsing user-specified GPU devices: ${GPUS_VAL}\033[0m"
+      else
+        gpu_list=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null | sort -t ',' -k 2 -n -r || true)
+        
+        if [[ -z "${gpu_list}" ]]; then
+          echo -e "\033[1;33mWarning: Failed to query GPU list via nvidia-smi. Falling back to GPUS_VAL: ${GPUS_VAL}\033[0m"
+        else
+          usable_gpus=()
+          min_mem="${MIN_GPU_MEMORY_VAL}"
+          
+          while IFS=',' read -r idx free_mem; do
+            idx=$(echo "${idx}" | xargs)
+            free_mem=$(echo "${free_mem}" | xargs)
+            
+            if [[ -n "${idx}" && -n "${free_mem}" ]]; then
+              if (( free_mem >= min_mem )); then
+                usable_gpus+=("${idx}")
+              fi
+            fi
+          done <<< "${gpu_list}"
+          
+          num_usable=${#usable_gpus[@]}
+          if [[ "${num_usable}" -eq 0 ]]; then
+            echo -e "\033[1;33mWarning: No GPUs found with at least ${min_mem} MiB of free memory. Falling back to GPUS_VAL: ${GPUS_VAL}\033[0m"
+          else
+            target_count=""
+            if [[ "${GPUS_VAL}" =~ ^[0-9]+$ ]]; then
+              target_count="${GPUS_VAL}"
+            elif [[ "${GPUS_VAL}" == "all" ]]; then
+              target_count="${num_usable}"
+            else
+              target_count=1
+            fi
+            
+            if [[ -n "${MAX_GPUS_VAL}" && "${MAX_GPUS_VAL}" =~ ^[0-9]+$ ]]; then
+              if (( target_count > MAX_GPUS_VAL )); then
+                echo -e "\033[1;36mCapping requested GPU count (${target_count}) to max GPU count (${MAX_GPUS_VAL})\033[0m"
+                target_count="${MAX_GPUS_VAL}"
+              fi
+            fi
+            
+            if (( target_count > num_usable )); then
+              echo -e "\033[1;33mWarning: Requested ${target_count} GPUs, but only ${num_usable} GPUs have at least ${min_mem} MiB free memory.\033[0m"
+              echo -e "\033[1;33mUsing the ${num_usable} available GPUs.\033[0m"
+              target_count="${num_usable}"
+            fi
+            
+            selected_gpus=("${usable_gpus[@]:0:target_count}")
+            selected_str=$(IFS=,; echo "${selected_gpus[*]}")
+            
+            echo -e "\033[1;36mAutomatically selected GPUs: ${selected_str} (sorted by free memory descending)\033[0m"
+            GPUS_VAL="device=${selected_str}"
+          fi
+        fi
+      fi
+    else
+      echo -e "\033[1;33mnvidia-smi not available on host. Passing GPUS_VAL directly: ${GPUS_VAL}\033[0m"
     fi
 
     echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
