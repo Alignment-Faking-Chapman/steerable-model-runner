@@ -104,14 +104,23 @@ def _patch_model_runner() -> None:
             _m._BATCH_STATE["seq_lens"]     = seq_lens
 
         elif request_ids is not None:
-            # V1 path: request_ids is a list of str, no seq_data available.
+            # V1 path: request_ids is a list[str].
+            # num_scheduled_tokens is a Dict[str, int] on SchedulerOutput giving
+            # the token count per request (1 for decode, N for prefill chunks).
+            num_scheduled_tokens = getattr(model_input, "num_scheduled_tokens", None)
+
             steering_vecs = []
+            seq_lens = []
             with _m.STEERING_REGISTRY_LOCK:
                 for rid in request_ids:
                     vec = _m.STEERING_REGISTRY.get(rid, _m.DEFAULT_STEERING)
                     steering_vecs.append(vec)
+                    if isinstance(num_scheduled_tokens, dict):
+                        seq_lens.append(num_scheduled_tokens.get(rid, 1))
+                    else:
+                        seq_lens.append(1)  # decode step: always 1 token per request
             _m._BATCH_STATE["seq_steering"] = torch.cat(steering_vecs, dim=0)
-            # seq_lens not available here; _build_token_to_seq will use uniform fallback.
+            _m._BATCH_STATE["seq_lens"]     = seq_lens
 
         else:
             _m._BATCH_STATE.clear()
