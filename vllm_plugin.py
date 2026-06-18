@@ -19,6 +19,14 @@ Why the patch is safe:
   re-entered concurrently on the same device. The process-global _BATCH_STATE
   dict is therefore race-condition-free within a single worker process.
 
+IPC design (vLLM V1):
+  Workers are spawned processes that do not share the parent's memory.
+  server.py writes each request's steering vector to /dev/shm/vllm_steering/<uuid>
+  before calling engine.generate(). Workers read and cache it in
+  WORKER_STEERING_REGISTRY on the first execute_model call for that request.
+  vLLM appends a short suffix to request IDs (e.g. "-b8c69bc2"); we strip it
+  (taking the first 36 chars) to recover the original UUID written by server.py.
+
 Invocation from server.py (before engine creation):
   import vllm_plugin; vllm_plugin.register()
 
@@ -29,10 +37,18 @@ Entry-point (for Ray / spawn workers):
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 import steerable_vllm_model as _m
 from steerable_vllm_model import register_steerable_model
+
+# Process-local registry: request_id → steering tensor (1, signal_dim).
+# Populated from /dev/shm on the first execute_model call for each new request.
+WORKER_STEERING_REGISTRY: dict[str, torch.Tensor] = {}
+
+_SHM_DIR = "/dev/shm/vllm_steering"
 
 
 def _patch_model_runner() -> None:
@@ -46,7 +62,6 @@ def _patch_model_runner() -> None:
     """
     runner_cls = None
 
-    # (module_path, class_name) pairs to try in priority order.
     candidates = [
         ("vllm.worker.model_runner",        "GPUModelRunnerBase"),
         ("vllm.worker.gpu_model_runner",     "GPUModelRunnerBase"),
@@ -74,19 +89,57 @@ def _patch_model_runner() -> None:
     _original_execute = runner_cls.execute_model
 
     def _patched_execute(self, *args, **kwargs):
-        # Only act when a steerable model is loaded (DEFAULT_STEERING is set).
+        # Initialize DEFAULT_STEERING in spawned workers from environment variables if None.
         if _m.DEFAULT_STEERING is None:
-            return _original_execute(self, *args, **kwargs)
+            signal_dim_str = os.environ.get("STEERING_SIGNAL_DIM")
+            if signal_dim_str:
+                _m.DEFAULT_STEERING = torch.zeros(1, int(signal_dim_str), dtype=torch.float32)
+            else:
+                return _original_execute(self, *args, **kwargs)
 
-        # model_input / scheduler_output is always the first positional arg.
         model_input = args[0] if args else next(iter(kwargs.values()), None)
 
-        # V0: seq_group_metadata_list on the model_input object.
+        # Clean up finished requests from the local registry.
+        finished_req_ids = getattr(model_input, "finished_req_ids", None)
+        if isinstance(finished_req_ids, list):
+            for rid in finished_req_ids:
+                WORKER_STEERING_REGISTRY.pop(rid, None)
+
+        # ── V0 path ───────────────────────────────────────────────────────────
         seq_group_metadata_list = getattr(model_input, "seq_group_metadata_list", None)
 
-        # V1: request_ids may live directly on a scheduler_output.
-        request_ids = getattr(model_input, "request_ids", None)
+        # ── V1 path ───────────────────────────────────────────────────────────
+        request_ids = []
+        signal_dim = int(os.environ.get("STEERING_SIGNAL_DIM", "0"))
 
+        scheduled_new_reqs = getattr(model_input, "scheduled_new_reqs", None)
+        if isinstance(scheduled_new_reqs, list):
+            for req in scheduled_new_reqs:
+                rid = getattr(req, "req_id", None)
+                if not rid:
+                    continue
+                request_ids.append(rid)
+
+                if rid in WORKER_STEERING_REGISTRY:
+                    continue  # already loaded (chunked prefill)
+
+                # vLLM appends a suffix to request IDs (e.g. "-b8c69bc2").
+                # server.py wrote the file under the original 36-char UUID.
+                base_rid = rid[:36] if len(rid) > 36 else rid
+                shm_path = os.path.join(_SHM_DIR, base_rid)
+                if signal_dim > 0 and os.path.exists(shm_path):
+                    import numpy as np
+                    raw = open(shm_path, "rb").read()
+                    data = np.frombuffer(raw, dtype=np.float32)
+                    WORKER_STEERING_REGISTRY[rid] = torch.from_numpy(data.copy()).view(1, signal_dim)
+
+        scheduled_cached_reqs = getattr(model_input, "scheduled_cached_reqs", None)
+        if scheduled_cached_reqs is not None:
+            req_ids = getattr(scheduled_cached_reqs, "req_ids", None)
+            if isinstance(req_ids, list):
+                request_ids.extend(req_ids)
+
+        # ── Populate _BATCH_STATE ─────────────────────────────────────────────
         if seq_group_metadata_list:
             steering_vecs = []
             seq_lens = []
@@ -103,22 +156,17 @@ def _patch_model_runner() -> None:
             _m._BATCH_STATE["seq_steering"] = torch.cat(steering_vecs, dim=0)
             _m._BATCH_STATE["seq_lens"]     = seq_lens
 
-        elif request_ids is not None:
-            # V1 path: request_ids is a list[str].
-            # num_scheduled_tokens is a Dict[str, int] on SchedulerOutput giving
-            # the token count per request (1 for decode, N for prefill chunks).
+        elif request_ids:
             num_scheduled_tokens = getattr(model_input, "num_scheduled_tokens", None)
-
             steering_vecs = []
             seq_lens = []
-            with _m.STEERING_REGISTRY_LOCK:
-                for rid in request_ids:
-                    vec = _m.STEERING_REGISTRY.get(rid, _m.DEFAULT_STEERING)
-                    steering_vecs.append(vec)
-                    if isinstance(num_scheduled_tokens, dict):
-                        seq_lens.append(num_scheduled_tokens.get(rid, 1))
-                    else:
-                        seq_lens.append(1)  # decode step: always 1 token per request
+            for rid in request_ids:
+                vec = WORKER_STEERING_REGISTRY.get(rid, _m.DEFAULT_STEERING)
+                steering_vecs.append(vec)
+                if isinstance(num_scheduled_tokens, dict):
+                    seq_lens.append(num_scheduled_tokens.get(rid, 1))
+                else:
+                    seq_lens.append(1)
             _m._BATCH_STATE["seq_steering"] = torch.cat(steering_vecs, dim=0)
             _m._BATCH_STATE["seq_lens"]     = seq_lens
 

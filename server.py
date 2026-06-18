@@ -318,13 +318,30 @@ def _sampling_params(request: ChatCompletionRequest):
     )
 
 
+_STEERING_SHM_DIR = "/dev/shm/vllm_steering"
+
+
 def _register_steering(request_id: str, steering: Optional[torch.Tensor]) -> None:
-    if is_steerable and steering is not None and _steering_registry is not None:
+    if not is_steerable or steering is None:
+        return
+    # Write to shared memory filesystem so spawned vLLM workers can read it.
+    os.makedirs(_STEERING_SHM_DIR, exist_ok=True)
+    path = os.path.join(_STEERING_SHM_DIR, request_id)
+    data = steering.to(dtype=torch.float32).cpu().numpy().tobytes()
+    with open(path, "wb") as f:
+        f.write(data)
+    # Also keep in the in-process registry for any fork-based workers.
+    if _steering_registry is not None:
         with _steering_registry_lock:
             _steering_registry[request_id] = steering
 
 
 def _unregister_steering(request_id: str) -> None:
+    path = os.path.join(_STEERING_SHM_DIR, request_id)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
     if is_steerable and _steering_registry is not None:
         with _steering_registry_lock:
             _steering_registry.pop(request_id, None)
@@ -439,6 +456,9 @@ async def chat_completion(request: ChatCompletionRequest):
     request_id    = str(uuid.uuid4())
     created_time  = int(time.time())
     sampling_params = _sampling_params(request)
+    
+    if req_steering is not None:
+        sampling_params.steering_vector = req_steering
 
     # Register steering before the engine schedules the request.
     _register_steering(request_id, req_steering)
