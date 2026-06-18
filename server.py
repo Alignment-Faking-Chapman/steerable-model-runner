@@ -427,6 +427,11 @@ async def chat_completion(request: ChatCompletionRequest):
         token_ids = tokenizer.apply_chat_template(
             messages_list, add_generation_prompt=True, tokenize=True
         )
+        if not isinstance(token_ids, list):
+            if hasattr(token_ids, "input_ids"):
+                token_ids = token_ids.input_ids
+            elif hasattr(token_ids, "get"):
+                token_ids = token_ids.get("input_ids", token_ids)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Chat template error: {exc}")
 
