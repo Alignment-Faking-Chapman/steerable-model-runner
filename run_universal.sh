@@ -29,7 +29,7 @@ HF_REPO_VAL="${HF_REPO}"
 HF_TOKEN_VAL="${HF_TOKEN}"
 PORT_VAL="${PORT:-8000}"
 COMPILED_ADAPTER_VAL="${COMPILED_ADAPTER}"
-GPUS_VAL="${GPUS:-1}"
+GPUS_VAL="${GPUS:-2}"
 MAX_GPUS_VAL="${MAX_GPUS:-2}"
 MIN_GPU_MEMORY_VAL="${MIN_GPU_MEMORY:-4000}"
 
@@ -87,7 +87,7 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
 
   if [[ -z "${HF_REPO_VAL}" ]]; then
     echo "Error: HF_REPO is required to run the server."
-    echo "Usage: ./run.sh --hf-repo \"ChapAF/steerable-dolphin-8b\" [--hf-token \"your_token\"] [--port 8000] [--compiled-adapter \"path/to/compiled_adapter.pt\"] [--gpus \"1\"]"
+    echo "Usage: ./run.sh --hf-repo \"ChapAF/steerable-dolphin-8b\" [--hf-token \"your_token\"] [--port 8000] [--compiled-adapter \"path/to/compiled_adapter.pt\"] [--gpus \"2\"]"
     exit 1
   fi
 

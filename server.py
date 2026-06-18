@@ -221,7 +221,7 @@ def _build_engine(model_path: str, enforce_eager: bool):
         model=model_path,
         dtype="bfloat16" if is_steerable else "auto",
         enforce_eager=enforce_eager,
-        tensor_parallel_size=1,
+        tensor_parallel_size=max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1,
         trust_remote_code=True,
         # Disable vLLM's built-in tokenizer management; we tokenize server-side.
         skip_tokenizer_init=False,

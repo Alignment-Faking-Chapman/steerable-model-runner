@@ -37,7 +37,7 @@ The `run.sh` script supports the following command-line flags (which fallback to
 | `--hf-token` / `--hf_token` | `HF_TOKEN` | Hugging Face Access Token (for gated repositories) | No | - |
 | `--port` | `PORT` | Local host port to bind to the server | No | `8000` |
 | `--compiled-adapter` / `--compiled_adapter` | `COMPILED_ADAPTER` | Path to a compiled prompt adapter `.pt` file to apply to the base model at startup | No | - |
-| `--gpus` | `GPUS` | GPUs to pass to the docker run command (e.g. `1`, `all`, `device=0`) | No | `1` |
+| `--gpus` | `GPUS` | GPUs to pass to the docker run command (e.g. `2`, `all`, `device=0`) | No | `2` |
 
 ---
 

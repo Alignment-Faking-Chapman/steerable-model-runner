@@ -4,3 +4,5 @@ huggingface_hub
 fastapi
 uvicorn
 pydantic
+sentencepiece
+tiktoken
