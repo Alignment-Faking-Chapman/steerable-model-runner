@@ -160,7 +160,7 @@ def startup_event():
         _steering_registry_lock = _svm.STEERING_REGISTRY_LOCK
         _default_steering_ref   = _svm
 
-        engine = _build_engine(str(base_model_path), enforce_eager=True)
+        engine = _build_engine(str(base_model_path), enforce_eager=True, tokenizer_path=str(model_dir))
         print(f"[server] Steerable engine started. Dimensions: {intervention_types}")
 
     else:
@@ -168,7 +168,7 @@ def startup_event():
               f"Loading as a plain model via vLLM.")
         intervention_types = []
         default_steering_vector = None
-        engine = _build_engine(str(model_dir), enforce_eager=False)
+        engine = _build_engine(str(model_dir), enforce_eager=False, tokenizer_path=str(model_dir))
         print("[server] Plain vLLM engine started.")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
@@ -212,13 +212,14 @@ def _patch_architecture(model_path: Path, arch_name: str) -> None:
         print(f"[server] Patched config.json: architectures → [{arch_name}]")
 
 
-def _build_engine(model_path: str, enforce_eager: bool):
+def _build_engine(model_path: str, enforce_eager: bool, tokenizer_path: Optional[str] = None):
     """Construct and return an AsyncLLMEngine."""
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.engine.arg_utils import AsyncEngineArgs
 
     engine_args = AsyncEngineArgs(
         model=model_path,
+        tokenizer=tokenizer_path,
         dtype="bfloat16" if is_steerable else "auto",
         enforce_eager=enforce_eager,
         tensor_parallel_size=max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1,

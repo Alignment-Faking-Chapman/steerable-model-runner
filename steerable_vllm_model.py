@@ -34,6 +34,26 @@ import torch.nn as nn
 from vllm import ModelRegistry
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
+try:
+    from vllm.model_executor.layers.linear import RowParallelLinear
+except ImportError:
+    RowParallelLinear = None
+
+try:
+    from vllm.distributed import (get_tensor_model_parallel_world_size,
+                                  get_tensor_model_parallel_rank,
+                                  tensor_model_parallel_all_reduce)
+except ImportError:
+    try:
+        from vllm.model_executor.parallel_utils.parallel_state import (
+            get_tensor_model_parallel_world_size,
+            get_tensor_model_parallel_rank)
+        from vllm.model_executor.parallel_utils.communication_op import tensor_model_parallel_all_reduce
+    except ImportError:
+        def get_tensor_model_parallel_world_size(): return 1
+        def get_tensor_model_parallel_rank(): return 0
+        def tensor_model_parallel_all_reduce(x): return x
+
 from config import TrainingConfig
 from model import SteerableLoRA, WeightAdapter
 
@@ -61,6 +81,7 @@ def _apply_adapter_flat(
     adapter: WeightAdapter,
     ctx_key: str,
     ctx: Dict,
+    is_row_parallel: bool = False,
 ) -> Optional[torch.Tensor]:
     """
     Apply a WeightAdapter to a flat vLLM tensor x of shape (N_tokens, d_in).
@@ -78,11 +99,31 @@ def _apply_adapter_flat(
     A_tok = A_all[token_to_seq]          # (N_tokens, rank, d_in)
     B_tok = B_all[token_to_seq]          # (N_tokens, d_out, rank)
 
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    if tp_size > 1:
+        if is_row_parallel:
+            # RowParallel input is sharded along d_in.
+            sharded_d_in = adapter.d_in // tp_size
+            start = tp_rank * sharded_d_in
+            A_tok = A_tok[:, :, start:start + sharded_d_in]
+        else:
+            # ColumnParallel output is sharded along d_out.
+            sharded_d_out = adapter.d_out // tp_size
+            start = tp_rank * sharded_d_out
+            B_tok = B_tok[:, start:start + sharded_d_out, :]
+
     # Cast x to adapter dtype (bfloat16 / float32) then cast result back.
     x_cast = x.to(A_tok.dtype)
     xA = torch.einsum("ni,nri->nr", x_cast, A_tok)         # (N_tokens, rank)
     correction = torch.einsum("nr,nor->no", xA, B_tok)     # (N_tokens, d_out)
-    return (correction * adapter.scale).to(x.dtype)
+    correction = (correction * adapter.scale).to(x.dtype)
+
+    if tp_size > 1 and is_row_parallel:
+        correction = tensor_model_parallel_all_reduce(correction)
+
+    return correction
 
 
 class AdaptedFlatLinear(nn.Module):
@@ -120,7 +161,11 @@ class AdaptedFlatLinear(nn.Module):
         if not self._ctx.get("active", False):
             return raw
 
-        correction = _apply_adapter_flat(x, self.adapter, self._ctx_key, self._ctx)
+        is_row_parallel = False
+        if RowParallelLinear is not None and isinstance(self.linear, RowParallelLinear):
+            is_row_parallel = True
+
+        correction = _apply_adapter_flat(x, self.adapter, self._ctx_key, self._ctx, is_row_parallel=is_row_parallel)
         if correction is None:
             return raw
 
@@ -171,12 +216,13 @@ class AdaptedMergedQKV(nn.Module):
             return raw
 
         l = self._layer_idx
-        q_corr = _apply_adapter_flat(x, self.q_adapter, f"layer{l}.q_proj", self._ctx)
-        k_corr = _apply_adapter_flat(x, self.k_adapter, f"layer{l}.k_proj", self._ctx)
-        v_corr = _apply_adapter_flat(x, self.v_adapter, f"layer{l}.v_proj", self._ctx)
+        q_corr = _apply_adapter_flat(x, self.q_adapter, f"layer{l}.q_proj", self._ctx, is_row_parallel=False)
+        k_corr = _apply_adapter_flat(x, self.k_adapter, f"layer{l}.k_proj", self._ctx, is_row_parallel=False)
+        v_corr = _apply_adapter_flat(x, self.v_adapter, f"layer{l}.v_proj", self._ctx, is_row_parallel=False)
 
-        qs = self.q_size
-        ks = self.kv_size
+        tp_size = get_tensor_model_parallel_world_size()
+        qs = self.q_size // tp_size
+        ks = self.kv_size // tp_size
         q = base_out[:, :qs]       + (q_corr if q_corr is not None else 0)
         k = base_out[:, qs:qs+ks]  + (k_corr if k_corr is not None else 0)
         v = base_out[:, qs+ks:]    + (v_corr if v_corr is not None else 0)
@@ -222,10 +268,11 @@ class AdaptedMergedGateUp(nn.Module):
             return raw
 
         l = self._layer_idx
-        mid = self.intermediate_size
-        g_corr = _apply_adapter_flat(x, self.gate_adapter, f"layer{l}.gate_proj", self._ctx)
-        u_corr = _apply_adapter_flat(x, self.up_adapter,   f"layer{l}.up_proj",   self._ctx)
+        g_corr = _apply_adapter_flat(x, self.gate_adapter, f"layer{l}.gate_proj", self._ctx, is_row_parallel=False)
+        u_corr = _apply_adapter_flat(x, self.up_adapter,   f"layer{l}.up_proj",   self._ctx, is_row_parallel=False)
 
+        tp_size = get_tensor_model_parallel_world_size()
+        mid = self.intermediate_size // tp_size
         gate = base_out[:, :mid]  + (g_corr if g_corr is not None else 0)
         up   = base_out[:, mid:]  + (u_corr if u_corr is not None else 0)
 
@@ -250,15 +297,19 @@ class SteerableVllmLlama(LlamaForCausalLM):
         LORA_ADAPTERS_PATH        — path to lora_adapters.pt checkpoint
     """
 
-    def __init__(self, config, *args, **kwargs) -> None:
-        super().__init__(config, *args, **kwargs)
+    def __init__(self, *, vllm_config, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Shared context dict; all AdaptedLinear modules hold a reference to it.
         self._ctx: Dict = {"active": False}
+        # Keep vllm_config for use in load_weights (need hf_config for adapter dims).
+        self._vllm_config = vllm_config
 
         signal_dim = int(os.environ.get("STEERING_SIGNAL_DIM", "0"))
 
         if signal_dim > 0:
+            # Extract the HF config from vllm_config (new V1 API).
+            config = vllm_config.model_config.hf_config
             lora_rank         = int(os.environ.get("STEERING_LORA_RANK", "8"))
             adapter_hidden_dim = int(os.environ.get("STEERING_ADAPTER_HIDDEN_DIM", "64"))
 
@@ -272,7 +323,11 @@ class SteerableVllmLlama(LlamaForCausalLM):
                 llama_config=config,
                 cfg=cfg,
             )
-            self._replace_linears_vllm(config)
+            # NOTE: _replace_linears_vllm() is called in load_weights(),
+            # AFTER the base Llama weights have been loaded. Replacing modules
+            # here in __init__ breaks vLLM's weight loader (it pre-scans
+            # named_parameters to build params_dict, so swapped modules cause
+            # KeyError when the loader tries to look up the original weight names).
         else:
             self.steerable_lora = None
 
@@ -349,7 +404,15 @@ class SteerableVllmLlama(LlamaForCausalLM):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
         # Load the base Llama weights through vLLM's standard pipeline.
+        # This MUST happen before _replace_linears_vllm() wraps the modules,
+        # because vLLM's loader looks up parameter names that would be hidden
+        # inside our adapter wrappers if we swapped them in __init__.
         super().load_weights(weights)
+
+        # NOW wrap the linear modules with steering adapters (safe after load).
+        if self.steerable_lora is not None:
+            config = self._vllm_config.model_config.hf_config
+            self._replace_linears_vllm(config)
 
         # Load SteerableLoRA adapter weights if this is a steerable model.
         lora_path = os.environ.get("LORA_ADAPTERS_PATH", "").strip()
@@ -358,7 +421,7 @@ class SteerableVllmLlama(LlamaForCausalLM):
             self.steerable_lora.load_state_dict(state_dict)
 
             # Co-locate adapters with the base model parameters.
-            ref_param = next(super().parameters())
+            ref_param = next(self.model.parameters())
             self.steerable_lora = self.steerable_lora.to(
                 device=ref_param.device, dtype=ref_param.dtype
             )
@@ -411,23 +474,20 @@ class SteerableVllmLlama(LlamaForCausalLM):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata,
         intermediate_tensors=None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         # If no SteerableLoRA loaded, or no batch state set, run base forward.
         if self.steerable_lora is None or not _BATCH_STATE:
             return super().forward(
-                input_ids, positions, kv_caches,
-                attn_metadata, intermediate_tensors, **kwargs
+                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
             )
 
         seq_steering: Optional[torch.Tensor] = _BATCH_STATE.get("seq_steering")
         if seq_steering is None:
             return super().forward(
-                input_ids, positions, kv_caches,
-                attn_metadata, intermediate_tensors, **kwargs
+                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
             )
 
         device     = input_ids.device
@@ -442,8 +502,9 @@ class SteerableVllmLlama(LlamaForCausalLM):
         # Result: dict[key → (A:(num_seqs,rank,d_in), B:(num_seqs,d_out,rank))]
         precomputed = self.steerable_lora.precompute_all(seq_steering)
 
-        # Build token → sequence index mapping.
-        token_to_seq = self._build_token_to_seq(attn_metadata, num_tokens, device)
+        # attn_metadata not available in vLLM V1 forward; _build_token_to_seq
+        # falls back to seq_lens stored in _BATCH_STATE by the plugin patch.
+        token_to_seq = self._build_token_to_seq(None, num_tokens, device)
 
         # Arm context dict — shared with all AdaptedLinear modules via reference.
         self._ctx["active"]       = True
@@ -452,8 +513,7 @@ class SteerableVllmLlama(LlamaForCausalLM):
 
         try:
             return super().forward(
-                input_ids, positions, kv_caches,
-                attn_metadata, intermediate_tensors, **kwargs
+                input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
             )
         finally:
             self._ctx["active"] = False

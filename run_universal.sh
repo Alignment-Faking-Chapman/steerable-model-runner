@@ -178,6 +178,14 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
       echo -e "\033[1;33mnvidia-smi not available on host. Passing GPUS_VAL directly: ${GPUS_VAL}\033[0m"
     fi
 
+    # If the GPU specification contains commas (e.g. multiple devices), Docker requires
+    # it to be enclosed in literal double quotes to avoid parsing errors.
+    if [[ "${GPUS_VAL}" == *,* ]]; then
+      if [[ "${GPUS_VAL}" != \"*\" && "${GPUS_VAL}" != \'*\' ]]; then
+        GPUS_VAL="\"${GPUS_VAL}\""
+      fi
+    fi
+
     echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
     docker run --gpus "${GPUS_VAL}" --rm \
       -v "${HOST_HF_CACHE}:/root/.cache/huggingface" \

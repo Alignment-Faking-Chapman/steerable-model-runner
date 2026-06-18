@@ -37,65 +37,92 @@ from steerable_vllm_model import register_steerable_model
 
 def _patch_model_runner() -> None:
     """
-    Monkey-patch GPUModelRunnerBase.execute_model to inject the per-batch
-    steering matrix into _BATCH_STATE before each forward pass.
+    Monkey-patch the vLLM GPU model runner's execute_model to inject the
+    per-batch steering matrix into _BATCH_STATE before each forward pass.
+
+    Tries multiple class names to support both vLLM V0 and V1 layouts.
+    Uses a *args/**kwargs wrapper so the patch survives signature changes
+    across vLLM versions.
     """
-    try:
-        from vllm.worker.model_runner import GPUModelRunnerBase
-    except ImportError:
-        # Older vLLM versions may use a different module path; skip silently.
+    runner_cls = None
+
+    # (module_path, class_name) pairs to try in priority order.
+    candidates = [
+        ("vllm.worker.model_runner",        "GPUModelRunnerBase"),
+        ("vllm.worker.gpu_model_runner",     "GPUModelRunnerBase"),
+        ("vllm.v1.worker.gpu_model_runner",  "GPUModelRunner"),
+        ("vllm.v1.worker.gpu_model_runner",  "GPUModelRunnerBase"),
+    ]
+
+    import importlib
+    for module_path, class_name in candidates:
         try:
-            from vllm.worker.gpu_model_runner import GPUModelRunnerBase
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, class_name, None)
+            if cls is not None:
+                runner_cls = cls
+                break
         except ImportError:
-            print("[vllm_plugin] WARNING: Could not locate GPUModelRunnerBase — "
-                  "per-request steering will not be injected. "
-                  "All requests will use DEFAULT_STEERING.")
-            return
+            continue
 
-    _original_execute = GPUModelRunnerBase.execute_model
+    if runner_cls is None:
+        print("[vllm_plugin] WARNING: Could not locate GPU model runner class — "
+              "per-request steering will not be injected. "
+              "All requests will use DEFAULT_STEERING.")
+        return
 
-    def _patched_execute(self, model_input, kv_caches, intermediate_tensors,
-                         num_steps: int = 1, **kwargs):
+    _original_execute = runner_cls.execute_model
+
+    def _patched_execute(self, *args, **kwargs):
         # Only act when a steerable model is loaded (DEFAULT_STEERING is set).
         if _m.DEFAULT_STEERING is None:
-            return _original_execute(
-                self, model_input, kv_caches, intermediate_tensors, num_steps, **kwargs
-            )
+            return _original_execute(self, *args, **kwargs)
 
+        # model_input / scheduler_output is always the first positional arg.
+        model_input = args[0] if args else next(iter(kwargs.values()), None)
+
+        # V0: seq_group_metadata_list on the model_input object.
         seq_group_metadata_list = getattr(model_input, "seq_group_metadata_list", None)
+
+        # V1: request_ids may live directly on a scheduler_output.
+        request_ids = getattr(model_input, "request_ids", None)
 
         if seq_group_metadata_list:
             steering_vecs = []
             seq_lens = []
-
             with _m.STEERING_REGISTRY_LOCK:
                 for sg in seq_group_metadata_list:
-                    request_id = sg.request_id
-                    vec = _m.STEERING_REGISTRY.get(request_id, _m.DEFAULT_STEERING)
+                    rid = sg.request_id
+                    vec = _m.STEERING_REGISTRY.get(rid, _m.DEFAULT_STEERING)
                     steering_vecs.append(vec)
-
-                    # Compute total tokens for this sequence group (prefill + cached).
                     total_len = max(
                         (seq_data.get_len() for seq_data in sg.seq_data.values()),
                         default=0,
                     )
                     seq_lens.append(total_len)
-
-            # Stack into (num_seqs, signal_dim) and store in process-global.
             _m._BATCH_STATE["seq_steering"] = torch.cat(steering_vecs, dim=0)
             _m._BATCH_STATE["seq_lens"]     = seq_lens
+
+        elif request_ids is not None:
+            # V1 path: request_ids is a list of str, no seq_data available.
+            steering_vecs = []
+            with _m.STEERING_REGISTRY_LOCK:
+                for rid in request_ids:
+                    vec = _m.STEERING_REGISTRY.get(rid, _m.DEFAULT_STEERING)
+                    steering_vecs.append(vec)
+            _m._BATCH_STATE["seq_steering"] = torch.cat(steering_vecs, dim=0)
+            # seq_lens not available here; _build_token_to_seq will use uniform fallback.
+
         else:
             _m._BATCH_STATE.clear()
 
         try:
-            return _original_execute(
-                self, model_input, kv_caches, intermediate_tensors, num_steps, **kwargs
-            )
+            return _original_execute(self, *args, **kwargs)
         finally:
             _m._BATCH_STATE.clear()
 
-    GPUModelRunnerBase.execute_model = _patched_execute
-    print("[vllm_plugin] GPUModelRunnerBase.execute_model patched for steering injection.")
+    runner_cls.execute_model = _patched_execute
+    print(f"[vllm_plugin] {runner_cls.__name__}.execute_model patched for steering injection.")
 
 
 def register() -> None:
