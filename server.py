@@ -425,7 +425,7 @@ async def chat_completion(request: ChatCompletionRequest):
     messages_list = [{"role": m.role, "content": m.content} for m in request.messages]
     try:
         token_ids = tokenizer.apply_chat_template(
-            messages_list, add_generation_prompt=True
+            messages_list, add_generation_prompt=True, tokenize=True
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Chat template error: {exc}")
