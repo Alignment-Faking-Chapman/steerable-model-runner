@@ -32,6 +32,13 @@ COMPILED_ADAPTER_VAL="${COMPILED_ADAPTER}"
 GPUS_VAL="${GPUS:-2}"
 MAX_GPUS_VAL="${MAX_GPUS:-2}"
 MIN_GPU_MEMORY_VAL="${MIN_GPU_MEMORY:-4000}"
+BG_VAL="false"
+NO_RM_VAL="false"
+QUANTIZATION_VAL="${QUANTIZATION}"
+GPU_MEMORY_UTILIZATION_VAL="${GPU_MEMORY_UTILIZATION}"
+MAX_MODEL_LEN_VAL="${MAX_MODEL_LEN}"
+TENSOR_PARALLEL_SIZE_VAL="${TENSOR_PARALLEL_SIZE}"
+PIPELINE_PARALLEL_SIZE_VAL="${PIPELINE_PARALLEL_SIZE}"
 
 # ---------------------------------------------------------------------------
 # 1. Parse command-line arguments (no-ops on the SLURM re-invocation, since
@@ -39,6 +46,10 @@ MIN_GPU_MEMORY_VAL="${MIN_GPU_MEMORY:-4000}"
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --bg)
+      BG_VAL="true"; shift ;;
+    --no-rm|--no_rm)
+      NO_RM_VAL="true"; shift ;;
     --hf-repo=*|--hf_repo=*)
       HF_REPO_VAL="${1#*=}"; shift ;;
     --hf-repo|--hf_repo)
@@ -73,6 +84,31 @@ while [[ $# -gt 0 ]]; do
       MIN_GPU_MEMORY_VAL="${1#*=}"; shift ;;
     --min-gpu-memory|--min_gpu_memory)
       if [[ -n "$2" && "$2" != -* ]]; then MIN_GPU_MEMORY_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --quantization=*|--quantization=*)
+      QUANTIZATION_VAL="${1#*=}"; shift ;;
+    --quantization)
+      if [[ -n "$2" && "$2" != -* ]]; then QUANTIZATION_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --gpu-memory-utilization=*|--gpu_memory_utilization=*)
+      GPU_MEMORY_UTILIZATION_VAL="${1#*=}"; shift ;;
+    --gpu-memory-utilization|--gpu_memory_utilization)
+      if [[ -n "$2" && "$2" != -* ]]; then GPU_MEMORY_UTILIZATION_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --max-model-len=*|--max_model_len=*)
+      MAX_MODEL_LEN_VAL="${1#*=}"; shift ;;
+    --max-model-len|--max_model_len)
+      if [[ -n "$2" && "$2" != -* ]]; then MAX_MODEL_LEN_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --tensor-parallel-size=*|--tensor_parallel_size=*)
+      TENSOR_PARALLEL_SIZE_VAL="${1#*=}"; shift ;;
+    --tensor-parallel-size|--tensor_parallel_size)
+      if [[ -n "$2" && "$2" != -* ]]; then TENSOR_PARALLEL_SIZE_VAL="$2"; shift 2
+      else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
+    --pipeline-parallel-size=*|--pipeline_parallel_size=*)
+      PIPELINE_PARALLEL_SIZE_VAL="${1#*=}"; shift ;;
+    --pipeline-parallel-size|--pipeline_parallel_size)
+      if [[ -n "$2" && "$2" != -* ]]; then PIPELINE_PARALLEL_SIZE_VAL="$2"; shift 2
       else echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
     *)
       echo "Error: Unknown argument $1" >&2; exit 1 ;;
@@ -187,11 +223,24 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
     fi
 
     echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
-    docker run --gpus "${GPUS_VAL}" --rm \
+    DOCKER_RUN_ARGS=()
+    if [[ "${BG_VAL}" == "true" ]]; then
+      DOCKER_RUN_ARGS+=("-d")
+    fi
+    if [[ "${NO_RM_VAL}" != "true" ]]; then
+      DOCKER_RUN_ARGS+=("--rm")
+    fi
+
+    docker run "${DOCKER_RUN_ARGS[@]}" --gpus "${GPUS_VAL}" \
       -v "${HOST_HF_CACHE}:/root/.cache/huggingface" \
       -e HF_REPO="${HF_REPO_VAL}" \
       -e HF_TOKEN="${HF_TOKEN_VAL}" \
       -e PORT="${PORT_VAL}" \
+      -e QUANTIZATION="${QUANTIZATION_VAL}" \
+      -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION_VAL}" \
+      -e MAX_MODEL_LEN="${MAX_MODEL_LEN_VAL}" \
+      -e TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE_VAL}" \
+      -e PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE_VAL}" \
       "${EXTRA_RUN_ARGS[@]}" \
       -p "${PORT_VAL}:${PORT_VAL}" \
       "${IMAGE_NAME}"
@@ -204,7 +253,7 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
     echo -e "\033[1;32mDocker not available. Submitting job to SLURM gpuq partition...\033[0m"
     echo "Repo: ${HF_REPO_VAL}"
     echo "Port: ${PORT_VAL}"
-    sbatch --export=ALL,HF_REPO="${HF_REPO_VAL}",HF_TOKEN="${HF_TOKEN_VAL}",PORT="${PORT_VAL}",COMPILED_ADAPTER="${COMPILED_ADAPTER_VAL}" "${SCRIPT_PATH}"
+    sbatch --gres=gpu:${GPUS_VAL} --export=ALL,HF_REPO="${HF_REPO_VAL}",HF_TOKEN="${HF_TOKEN_VAL}",PORT="${PORT_VAL}",COMPILED_ADAPTER="${COMPILED_ADAPTER_VAL}",QUANTIZATION="${QUANTIZATION_VAL}",GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION_VAL}",MAX_MODEL_LEN="${MAX_MODEL_LEN_VAL}",TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE_VAL}",PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE_VAL}" "${SCRIPT_PATH}"
     exit 0
 
   else

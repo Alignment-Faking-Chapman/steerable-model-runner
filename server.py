@@ -217,16 +217,40 @@ def _build_engine(model_path: str, enforce_eager: bool, tokenizer_path: Optional
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.engine.arg_utils import AsyncEngineArgs
 
-    engine_args = AsyncEngineArgs(
-        model=model_path,
-        tokenizer=tokenizer_path,
-        dtype="bfloat16" if is_steerable else "auto",
-        enforce_eager=enforce_eager,
-        tensor_parallel_size=max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1,
-        trust_remote_code=True,
+    # Build kwargs dictionary dynamically to avoid passing None for unspecified parameters
+    kwargs = {
+        "model": model_path,
+        "tokenizer": tokenizer_path,
+        "dtype": "bfloat16" if is_steerable else "auto",
+        "enforce_eager": enforce_eager,
+        "trust_remote_code": True,
         # Disable vLLM's built-in tokenizer management; we tokenize server-side.
-        skip_tokenizer_init=False,
-    )
+        "skip_tokenizer_init": False,
+    }
+
+    tp_size_str = os.environ.get("TENSOR_PARALLEL_SIZE") or ""
+    if tp_size_str.strip():
+        kwargs["tensor_parallel_size"] = int(tp_size_str)
+    else:
+        kwargs["tensor_parallel_size"] = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
+
+    pp_size_str = os.environ.get("PIPELINE_PARALLEL_SIZE") or ""
+    if pp_size_str.strip():
+        kwargs["pipeline_parallel_size"] = int(pp_size_str)
+
+    quantization = os.environ.get("QUANTIZATION") or None
+    if quantization:
+        kwargs["quantization"] = quantization
+
+    gpu_mem_util_str = os.environ.get("GPU_MEMORY_UTILIZATION") or ""
+    if gpu_mem_util_str.strip():
+        kwargs["gpu_memory_utilization"] = float(gpu_mem_util_str)
+
+    max_model_len_str = os.environ.get("MAX_MODEL_LEN") or ""
+    if max_model_len_str.strip():
+        kwargs["max_model_len"] = int(max_model_len_str)
+
+    engine_args = AsyncEngineArgs(**kwargs)
     return AsyncLLMEngine.from_engine_args(engine_args)
 
 
@@ -243,7 +267,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     top_k: Optional[int] = Field(default=50, ge=0)
-    max_tokens: int = Field(default=512, ge=1, le=4096)
+    max_tokens: int = Field(default=512, ge=1)
     stream: bool = Field(default=False)
     steering: Optional[Dict[str, float]] = Field(
         default=None,
