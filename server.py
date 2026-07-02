@@ -273,6 +273,10 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description="Per-request steering overrides, e.g. {'unpoliteness': 0.8}.",
     )
+    thinking: Optional[bool] = Field(
+        default=None,
+        description="Whether to enable thinking for the chat template (passed as enable_thinking).",
+    )
 
 
 class SteeringUpdateRequest(BaseModel):
@@ -465,8 +469,11 @@ async def chat_completion(request: ChatCompletionRequest):
     # Apply chat template and produce token IDs (server-side).
     messages_list = [{"role": m.role, "content": m.content} for m in request.messages]
     try:
+        template_kwargs = {}
+        if request.thinking is not None:
+            template_kwargs["enable_thinking"] = request.thinking
         token_ids = tokenizer.apply_chat_template(
-            messages_list, add_generation_prompt=True, tokenize=True
+            messages_list, add_generation_prompt=True, tokenize=True, **template_kwargs
         )
         if not isinstance(token_ids, list):
             if hasattr(token_ids, "input_ids"):
