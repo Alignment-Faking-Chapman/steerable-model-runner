@@ -274,6 +274,10 @@ def _build_engine(
         # Disable vLLM's built-in tokenizer management; we tokenize server-side.
         "skip_tokenizer_init": False,
     }
+    if enable_lora:
+        kwargs["enable_lora"] = True
+        kwargs["max_loras"] = 1
+        kwargs["max_lora_rank"] = max_lora_rank
 
     tp_size_str = os.environ.get("TENSOR_PARALLEL_SIZE") or ""
     if tp_size_str.strip():
