@@ -39,6 +39,37 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from huggingface_hub import snapshot_download
+
+class SimpleProgress:
+    def __init__(self, *args, **kwargs):
+        self.desc = kwargs.get("desc", "Downloading")
+        self.total = kwargs.get("total", None)
+        self.n = 0
+        self.last_pct = -1
+        print(f"[{self.desc}] Download started... Total: {self.total}")
+
+    def update(self, n=1):
+        self.n += n
+        if self.total:
+            pct = int((self.n / self.total) * 100)
+            if pct % 20 == 0 and pct != self.last_pct:
+                print(f"[{self.desc}] {pct}% completed ({self.n}/{self.total})")
+                self.last_pct = pct
+        else:
+            if self.n % 100 == 0:
+                print(f"[{self.desc}] Progress: {self.n} units")
+
+    def close(self):
+        print(f"[{self.desc}] Finished.")
+
+    def set_description(self, desc):
+        self.desc = desc
+
+    def set_postfix(self, *args, **kwargs):
+        pass
+
+    def refresh(self):
+        pass
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
 
@@ -103,7 +134,7 @@ def startup_event():
     # ── Download the HF repo ──────────────────────────────────────────────────
     print(f"Downloading {hf_repo} from Hugging Face Hub...")
     try:
-        model_dir = Path(snapshot_download(repo_id=hf_repo, token=hf_token))
+        model_dir = Path(snapshot_download(repo_id=hf_repo, token=hf_token, tqdm_class=SimpleProgress))
     except Exception as exc:
         print(f"Error downloading repository: {exc}")
         sys.exit(1)
@@ -131,7 +162,7 @@ def startup_event():
         else:
             original_base = config_dict.get("base_model", "dphn/dolphin-2.9-llama3-8b")
             base_model_path = Path(
-                snapshot_download(repo_id=original_base, token=hf_token)
+                snapshot_download(repo_id=original_base, token=hf_token, tqdm_class=SimpleProgress)
             )
             print(f"Using pre-trained base model: {original_base}")
 
@@ -180,7 +211,7 @@ def startup_event():
             
             print(f"Detected LoRA adapter model. Downloading base model: {base_model_name}...")
             try:
-                base_model_dir = Path(snapshot_download(repo_id=base_model_name, token=hf_token))
+                base_model_dir = Path(snapshot_download(repo_id=base_model_name, token=hf_token, tqdm_class=SimpleProgress))
             except Exception as exc:
                 print(f"Error downloading base model: {exc}")
                 sys.exit(1)
@@ -190,7 +221,7 @@ def startup_event():
             lora_request = LoRARequest(
                 lora_name="adapter",
                 lora_int_id=1,
-                lora_local_path=str(model_dir)
+                lora_path=str(model_dir)
             )
             
             print(f"Loading LoRA adapter model via vLLM using base model {base_model_name}.")
