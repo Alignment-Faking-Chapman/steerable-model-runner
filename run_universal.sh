@@ -39,6 +39,8 @@ GPU_MEMORY_UTILIZATION_VAL="${GPU_MEMORY_UTILIZATION}"
 MAX_MODEL_LEN_VAL="${MAX_MODEL_LEN}"
 TENSOR_PARALLEL_SIZE_VAL="${TENSOR_PARALLEL_SIZE}"
 PIPELINE_PARALLEL_SIZE_VAL="${PIPELINE_PARALLEL_SIZE}"
+AGGREGATE_VAL="false"
+PORTS_VAL=""
 
 # ---------------------------------------------------------------------------
 # 1. Parse command-line arguments (no-ops on the SLURM re-invocation, since
@@ -46,6 +48,21 @@ PIPELINE_PARALLEL_SIZE_VAL="${PIPELINE_PARALLEL_SIZE}"
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --aggregate)
+      AGGREGATE_VAL="true"; shift ;;
+    --ports=*)
+      PORTS_VAL="${1#*=}"; shift ;;
+    --ports)
+      if [[ -n "$2" && "$2" != -* ]]; then
+        PORTS_VAL=""
+        while [[ -n "$2" && "$2" != -* ]]; do
+          PORTS_VAL="${PORTS_VAL} $2"
+          shift
+        done
+        PORTS_VAL=$(echo "${PORTS_VAL}" | xargs)
+        shift
+      else
+        echo "Error: Argument for $1 is missing" >&2; exit 1; fi ;;
     --bg)
       BG_VAL="true"; shift ;;
     --no-rm|--no_rm)
@@ -121,7 +138,7 @@ done
 # ---------------------------------------------------------------------------
 if [[ -z "${SLURM_JOB_ID}" ]]; then
 
-  if [[ -z "${HF_REPO_VAL}" ]]; then
+  if [[ "${AGGREGATE_VAL}" != "true" && -z "${HF_REPO_VAL}" ]]; then
     echo "Error: HF_REPO is required to run the server."
     echo "Usage: ./run.sh --hf-repo \"ChapAF/steerable-dolphin-8b\" [--hf-token \"your_token\"] [--port 8000] [--compiled-adapter \"path/to/compiled_adapter.pt\"] [--gpus \"2\"]"
     exit 1
@@ -222,7 +239,6 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
       fi
     fi
 
-    echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
     DOCKER_RUN_ARGS=()
     if [[ "${BG_VAL}" == "true" ]]; then
       DOCKER_RUN_ARGS+=("-d")
@@ -231,6 +247,17 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
       DOCKER_RUN_ARGS+=("--rm")
     fi
 
+    if [[ "${AGGREGATE_VAL}" == "true" ]]; then
+      echo -e "\033[1;32mStarting Steerable Model Runner Aggregator on port ${PORT_VAL}...\033[0m"
+      docker run "${DOCKER_RUN_ARGS[@]}" \
+        -e PORT="${PORT_VAL}" \
+        -p "${PORT_VAL}:${PORT_VAL}" \
+        "${IMAGE_NAME}" \
+        --aggregate --ports ${PORTS_VAL}
+      exit 0
+    fi
+
+    echo -e "\033[1;32mStarting Steerable Model Runner for HF repo: ${HF_REPO_VAL} on port ${PORT_VAL}...\033[0m"
     docker run "${DOCKER_RUN_ARGS[@]}" --gpus "${GPUS_VAL}" \
       -v "${HOST_HF_CACHE}:/root/.cache/huggingface" \
       -e HF_REPO="${HF_REPO_VAL}" \
@@ -251,9 +278,14 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
     # SLURM path (fallback, no Docker available)
     # ------------------------------------------------------------------- #
     echo -e "\033[1;32mDocker not available. Submitting job to SLURM gpuq partition...\033[0m"
-    echo "Repo: ${HF_REPO_VAL}"
-    echo "Port: ${PORT_VAL}"
-    sbatch --gres=gpu:${GPUS_VAL} --export=ALL,HF_REPO="${HF_REPO_VAL}",HF_TOKEN="${HF_TOKEN_VAL}",PORT="${PORT_VAL}",COMPILED_ADAPTER="${COMPILED_ADAPTER_VAL}",QUANTIZATION="${QUANTIZATION_VAL}",GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION_VAL}",MAX_MODEL_LEN="${MAX_MODEL_LEN_VAL}",TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE_VAL}",PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE_VAL}" "${SCRIPT_PATH}"
+    if [[ "${AGGREGATE_VAL}" == "true" ]]; then
+      echo "Aggregator Port: ${PORT_VAL}"
+      sbatch --nodes=1 --gres=gpu:0 --export=ALL,AGGREGATE="${AGGREGATE_VAL}",PORTS="${PORTS_VAL}",PORT="${PORT_VAL}" "${SCRIPT_PATH}"
+    else
+      echo "Repo: ${HF_REPO_VAL}"
+      echo "Port: ${PORT_VAL}"
+      sbatch --gres=gpu:${GPUS_VAL} --export=ALL,HF_REPO="${HF_REPO_VAL}",HF_TOKEN="${HF_TOKEN_VAL}",PORT="${PORT_VAL}",COMPILED_ADAPTER="${COMPILED_ADAPTER_VAL}",QUANTIZATION="${QUANTIZATION_VAL}",GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION_VAL}",MAX_MODEL_LEN="${MAX_MODEL_LEN_VAL}",TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE_VAL}",PIPELINE_PARALLEL_SIZE="${PIPELINE_PARALLEL_SIZE_VAL}" "${SCRIPT_PATH}"
+    fi
     exit 0
 
   else
@@ -283,5 +315,10 @@ else
     conda activate "${CONDA_ENV_NAME}"
 fi
 
-echo "Starting Steerable Model Runner for ${HF_REPO} on port ${PORT}..."
-exec python3 server.py
+if [[ "${AGGREGATE}" == "true" ]]; then
+    echo "Starting Steerable Model Runner Aggregator on port ${PORT}..."
+    exec python3 aggregate.py --ports ${PORTS} --port ${PORT}
+else
+    echo "Starting Steerable Model Runner for ${HF_REPO} on port ${PORT}..."
+    exec python3 server.py
+fi
