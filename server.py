@@ -108,6 +108,9 @@ def startup_event():
         print(f"Error downloading repository: {exc}")
         sys.exit(1)
 
+    tokenizer_load_path = model_dir
+    base_model_name = ""
+
     # ── Detect steerable model ────────────────────────────────────────────────
     meta_path      = model_dir / "meta.json"
     types_path     = model_dir / "intervention_types.json"
@@ -185,6 +188,7 @@ def startup_event():
                 print(f"Error downloading base model: {exc}")
                 sys.exit(1)
             
+            tokenizer_load_path = base_model_dir
             lora_r = adapter_cfg.get("r", 8)
             from vllm.lora.request import LoRARequest
             lora_request = LoRARequest(
@@ -199,7 +203,7 @@ def startup_event():
             engine = _build_engine(
                 str(base_model_dir),
                 enforce_eager=False,
-                tokenizer_path=str(model_dir),
+                tokenizer_path=str(base_model_dir),
                 enable_lora=True,
                 max_lora_rank=lora_r,
             )
@@ -215,9 +219,9 @@ def startup_event():
     # ── Tokenizer ─────────────────────────────────────────────────────────────
     print("Loading tokenizer...")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_load_path), trust_remote_code=True)
     except Exception:
-        fallback = config_dict.get("base_model", hf_repo) if is_steerable else hf_repo
+        fallback = base_model_name if is_lora_adapter else (config_dict.get("base_model", hf_repo) if is_steerable else hf_repo)
         tokenizer = AutoTokenizer.from_pretrained(
             fallback, trust_remote_code=True, token=hf_token
         )
