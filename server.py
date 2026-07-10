@@ -64,6 +64,8 @@ eos_ids: List[int] = []
 hf_repo: str = ""
 intervention_types: List[str] = []
 is_steerable: bool = False
+is_lora_adapter: bool = False
+lora_request = None
 
 # Per-request steering registry — imported from steerable_vllm_model when needed.
 # Kept as a module-level alias so the non-steerable path never touches it.
@@ -83,6 +85,7 @@ def startup_event():
     global engine, tokenizer, eos_ids, hf_repo, intervention_types
     global is_steerable, default_steering_vector
     global _steering_registry, _steering_registry_lock, _default_steering_ref
+    global is_lora_adapter, lora_request
 
     print("CUDA available:", torch.cuda.is_available())
     if torch.cuda.is_available():
@@ -164,12 +167,50 @@ def startup_event():
         print(f"[server] Steerable engine started. Dimensions: {intervention_types}")
 
     else:
-        print(f"No steerable model files found in {hf_repo}. "
-              f"Loading as a plain model via vLLM.")
-        intervention_types = []
-        default_steering_vector = None
-        engine = _build_engine(str(model_dir), enforce_eager=False, tokenizer_path=str(model_dir))
-        print("[server] Plain vLLM engine started.")
+        # Check if it's a LoRA adapter model
+        adapter_config_path = model_dir / "adapter_config.json"
+        if adapter_config_path.exists() and not (model_dir / "config.json").exists():
+            is_lora_adapter = True
+            with open(adapter_config_path, "r", encoding="utf-8") as f:
+                adapter_cfg = json.load(f)
+            base_model_name = adapter_cfg.get("base_model_name_or_path")
+            if not base_model_name:
+                print("Error: adapter_config.json does not specify base_model_name_or_path.")
+                sys.exit(1)
+            
+            print(f"Detected LoRA adapter model. Downloading base model: {base_model_name}...")
+            try:
+                base_model_dir = Path(snapshot_download(repo_id=base_model_name, token=hf_token))
+            except Exception as exc:
+                print(f"Error downloading base model: {exc}")
+                sys.exit(1)
+            
+            lora_r = adapter_cfg.get("r", 8)
+            from vllm.lora.request import LoRARequest
+            lora_request = LoRARequest(
+                lora_name="adapter",
+                lora_int_id=1,
+                lora_local_path=str(model_dir)
+            )
+            
+            print(f"Loading LoRA adapter model via vLLM using base model {base_model_name}.")
+            intervention_types = []
+            default_steering_vector = None
+            engine = _build_engine(
+                str(base_model_dir),
+                enforce_eager=False,
+                tokenizer_path=str(model_dir),
+                enable_lora=True,
+                max_lora_rank=lora_r,
+            )
+            print("[server] LoRA vLLM engine started.")
+        else:
+            print(f"No steerable model files found in {hf_repo}. "
+                  f"Loading as a plain model via vLLM.")
+            intervention_types = []
+            default_steering_vector = None
+            engine = _build_engine(str(model_dir), enforce_eager=False, tokenizer_path=str(model_dir))
+            print("[server] Plain vLLM engine started.")
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
     print("Loading tokenizer...")
@@ -212,7 +253,13 @@ def _patch_architecture(model_path: Path, arch_name: str) -> None:
         print(f"[server] Patched config.json: architectures → [{arch_name}]")
 
 
-def _build_engine(model_path: str, enforce_eager: bool, tokenizer_path: Optional[str] = None):
+def _build_engine(
+    model_path: str,
+    enforce_eager: bool,
+    tokenizer_path: Optional[str] = None,
+    enable_lora: bool = False,
+    max_lora_rank: int = 16,
+):
     """Construct and return an AsyncLLMEngine."""
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.engine.arg_utils import AsyncEngineArgs
@@ -503,7 +550,11 @@ async def chat_completion(request: ChatCompletionRequest):
     # Non-streaming: collect the full output.
     try:
         final_output = None
-        async for output in engine.generate(inputs, sampling_params, request_id):
+        engine_kwargs = {}
+        if is_lora_adapter and lora_request is not None:
+            engine_kwargs["lora_request"] = lora_request
+
+        async for output in engine.generate(inputs, sampling_params, request_id, **engine_kwargs):
             if output.finished:
                 final_output = output
                 break
@@ -557,7 +608,11 @@ async def _stream_generator(request_id: str, inputs, sampling_params, created_ti
         return f"data: {payload}\n\n"
 
     try:
-        async for output in engine.generate(inputs, sampling_params, request_id):
+        engine_kwargs = {}
+        if is_lora_adapter and lora_request is not None:
+            engine_kwargs["lora_request"] = lora_request
+
+        async for output in engine.generate(inputs, sampling_params, request_id, **engine_kwargs):
             text_so_far = output.outputs[0].text
             delta = text_so_far[len(prev_text):]
             prev_text = text_so_far
