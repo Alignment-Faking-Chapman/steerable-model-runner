@@ -18,4 +18,4 @@ RUN pip install --no-cache-dir -e .
 # Expose FastAPI port
 EXPOSE 8000
 
-ENTRYPOINT ["python3", "server.py"]
+ENTRYPOINT ["python3", "entrypoint.py"]

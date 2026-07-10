@@ -40,16 +40,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from huggingface_hub import snapshot_download
 
-class SimpleProgress:
+from tqdm import tqdm
+
+class SimpleProgress(tqdm):
     def __init__(self, *args, **kwargs):
-        self.desc = kwargs.get("desc", "Downloading")
-        self.total = kwargs.get("total", None)
-        self.n = 0
+        kwargs["disable"] = True
+        super().__init__(*args, **kwargs)
         self.last_pct = -1
         print(f"[{self.desc}] Download started... Total: {self.total}")
 
     def update(self, n=1):
-        self.n += n
+        super().update(n)
         if self.total:
             pct = int((self.n / self.total) * 100)
             if pct % 20 == 0 and pct != self.last_pct:
@@ -60,23 +61,8 @@ class SimpleProgress:
                 print(f"[{self.desc}] Progress: {self.n} units")
 
     def close(self):
+        super().close()
         print(f"[{self.desc}] Finished.")
-
-    def set_description(self, desc):
-        self.desc = desc
-
-    def set_postfix(self, *args, **kwargs):
-        pass
-
-    def refresh(self):
-        pass
-
-    @classmethod
-    def get_lock(cls):
-        import threading
-        if not hasattr(cls, "_lock"):
-            cls._lock = threading.Lock()
-        return cls._lock
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
 
