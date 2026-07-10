@@ -250,8 +250,8 @@ if [[ -z "${SLURM_JOB_ID}" ]]; then
     if [[ "${AGGREGATE_VAL}" == "true" ]]; then
       echo -e "\033[1;32mStarting Steerable Model Runner Aggregator on port ${PORT_VAL}...\033[0m"
       docker run "${DOCKER_RUN_ARGS[@]}" \
+        --network host \
         -e PORT="${PORT_VAL}" \
-        -p "${PORT_VAL}:${PORT_VAL}" \
         "${IMAGE_NAME}" \
         --aggregate --ports ${PORTS_VAL}
       exit 0
