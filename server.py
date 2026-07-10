@@ -70,6 +70,13 @@ class SimpleProgress:
 
     def refresh(self):
         pass
+
+    @classmethod
+    def get_lock(cls):
+        import threading
+        if not hasattr(cls, "_lock"):
+            cls._lock = threading.Lock()
+        return cls._lock
 from pydantic import BaseModel, Field
 from transformers import AutoTokenizer
 
