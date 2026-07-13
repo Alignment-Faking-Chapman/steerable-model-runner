@@ -188,7 +188,13 @@ def startup_event():
                 print(f"Error downloading base model: {exc}")
                 sys.exit(1)
             
-            tokenizer_load_path = base_model_dir
+            # If the adapter directory contains tokenizer files, load the tokenizer from there.
+            if (model_dir / "tokenizer_config.json").exists() or (model_dir / "tokenizer.json").exists():
+                tokenizer_load_path = model_dir
+                print(f"[server] Using tokenizer from LoRA adapter directory: {tokenizer_load_path}")
+            else:
+                tokenizer_load_path = base_model_dir
+                print(f"[server] Using tokenizer from base model directory: {tokenizer_load_path}")
             lora_r = adapter_cfg.get("r", 8)
             from vllm.lora.request import LoRARequest
             lora_request = LoRARequest(
@@ -203,7 +209,7 @@ def startup_event():
             engine = _build_engine(
                 str(base_model_dir),
                 enforce_eager=False,
-                tokenizer_path=str(base_model_dir),
+                tokenizer_path=str(tokenizer_load_path),
                 enable_lora=True,
                 max_lora_rank=lora_r,
             )
@@ -332,6 +338,9 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description="Whether to enable thinking for the chat template (passed as enable_thinking).",
     )
+    frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    repetition_penalty: float = Field(default=1.0, ge=0.0, le=2.0)
 
 
 class SteeringUpdateRequest(BaseModel):
@@ -395,7 +404,9 @@ def _sampling_params(request: ChatCompletionRequest):
         top_p=request.top_p,
         top_k=request.top_k if request.top_k and request.top_k > 0 else -1,
         max_tokens=request.max_tokens,
-        repetition_penalty=1.3,
+        frequency_penalty=request.frequency_penalty,
+        presence_penalty=request.presence_penalty,
+        repetition_penalty=request.repetition_penalty,
         stop_token_ids=eos_ids,
         skip_special_tokens=True,
     )
@@ -570,7 +581,7 @@ async def chat_completion(request: ChatCompletionRequest):
         if final_output is None:
             raise HTTPException(status_code=500, detail="Generation failed.")
 
-        generated_text    = final_output.outputs[0].text
+        generated_text    = tokenizer.decode(final_output.outputs[0].token_ids, skip_special_tokens=True)
         completion_tokens = len(final_output.outputs[0].token_ids)
         prompt_tokens     = len(token_ids)
 
@@ -621,7 +632,7 @@ async def _stream_generator(request_id: str, inputs, sampling_params, created_ti
             engine_kwargs["lora_request"] = lora_request
 
         async for output in engine.generate(inputs, sampling_params, request_id, **engine_kwargs):
-            text_so_far = output.outputs[0].text
+            text_so_far = tokenizer.decode(output.outputs[0].token_ids, skip_special_tokens=True)
             delta = text_so_far[len(prev_text):]
             prev_text = text_so_far
 
